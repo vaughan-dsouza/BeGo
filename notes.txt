@@ -1,0 +1,20 @@
+//init
+del go.mod
+del go.sum
+
+go clean -modcache
+
+go mod init github.com/vaughan-dsouza/BeGo
+go get github.com/golang-jwt/jwt/v5
+go get github.com/go-chi/chi/v5
+go get github.com/jmoiron/sqlx
+go get github.com/jackc/pgx/v5
+go get golang.org/x/crypto
+go get github.com/joho/godotenv
+
+go mod tidy
+
+go run ./cmd/api
+
+//db
+psql "$DATABASE_URL" -f migrations/schema.sql
