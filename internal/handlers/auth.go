@@ -14,13 +14,17 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-type Handler struct {
-	db *sqlx.DB
+type AuthHandler struct {
+	DB *sqlx.DB
 }
 
-func NewHandler(db *sqlx.DB) *Handler { return &Handler{db: db} }
+// FIX: return *AuthHandler
+func NewAuthHandler(db *sqlx.DB) *AuthHandler {
+	return &AuthHandler{DB: db}
+}
 
-// request/response structs
+// ----------- Request/Response DTOs -------------
+
 type signUpReq struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
@@ -31,240 +35,239 @@ type loginReq struct {
 	Password string `json:"password"`
 }
 
+type refreshReq struct {
+	RefreshToken string `json:"refresh_token"`
+}
+
 type tokenResp struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
 	ExpiresIn    int64  `json:"expires_in"`
 }
 
-func (h *Handler) SignUp(w http.ResponseWriter, r *http.Request) {
+// ----------- Helper: Write JSON -------------
+
+func (h *AuthHandler) json(w http.ResponseWriter, code int, data any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(data)
+}
+
+func (h *AuthHandler) error(w http.ResponseWriter, code int, msg string) {
+	h.json(w, code, map[string]string{"error": msg})
+}
+
+// -------------- SIGN UP ----------------------
+
+func (h *AuthHandler) SignUp(w http.ResponseWriter, r *http.Request) {
 	var req signUpReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		h.writeErr(w, http.StatusBadRequest, "invalid json")
+		h.error(w, http.StatusBadRequest, "invalid json")
 		return
 	}
+
 	if req.Email == "" || req.Password == "" {
-		h.writeErr(w, http.StatusBadRequest, "email and password required")
+		h.error(w, http.StatusBadRequest, "email and password required")
+		return
+	}
+
+	if len(req.Password) < 6 {
+		h.error(w, http.StatusBadRequest, "password must be at least 6 characters")
 		return
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
-		h.writeErr(w, http.StatusInternalServerError, "could not hash password")
+		h.error(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
-	_, err = h.db.Exec(`INSERT INTO users (email, password_hash) VALUES ($1, $2)`, req.Email, string(hash))
+	_, err = h.DB.Exec(`
+		INSERT INTO users (email, password_hash)
+		VALUES ($1, $2)
+	`, req.Email, string(hash))
+
 	if err != nil {
-		h.writeErr(w, http.StatusBadRequest, "email already exists")
+		h.error(w, http.StatusBadRequest, "email already exists")
 		return
 	}
-	w.WriteHeader(http.StatusCreated)
+
+	h.json(w, http.StatusCreated, map[string]string{
+		"message": "user created",
+	})
 }
 
-func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
+// -------------- LOGIN ------------------------
+
+func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	var req loginReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		h.writeErr(w, http.StatusBadRequest, "invalid json")
+		h.error(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 
 	var u models.User
-	err := h.db.Get(&u, `SELECT id, email, password_hash, role FROM users WHERE email=$1`, req.Email)
+
+	err := h.DB.Get(&u, `
+		SELECT id, email, password_hash, role
+		FROM users
+		WHERE email=$1
+	`, req.Email)
+
+	if errors.Is(err, sql.ErrNoRows) {
+		h.error(w, http.StatusUnauthorized, "invalid credentials")
+		return
+	}
+
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			h.writeErr(w, http.StatusUnauthorized, "invalid credentials")
-			return
-		}
-		h.writeErr(w, http.StatusInternalServerError, "db error")
+		h.error(w, http.StatusInternalServerError, "db error")
 		return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(u.Password), []byte(req.Password)); err != nil {
-		h.writeErr(w, http.StatusUnauthorized, "invalid credentials")
+		h.error(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
 
-	access, expAccess, err := utils.GenerateToken(
-		u.ID,
-		u.Email,
-		os.Getenv("ACCESS_SECRET"),
-		os.Getenv("ACCESS_TTL"),
-	)
+	access, expAccess, err := utils.GenerateToken(u.ID, u.Email, os.Getenv("ACCESS_SECRET"), os.Getenv("ACCESS_TTL"))
 	if err != nil {
-		h.writeErr(w, http.StatusInternalServerError, "could not generate access token")
+		h.error(w, http.StatusInternalServerError, "token error")
 		return
 	}
 
-	refresh, expRefresh, err := utils.GenerateToken(
-		u.ID,
-		u.Email,
-		os.Getenv("REFRESH_SECRET"),
-		os.Getenv("REFRESH_TTL"),
-	)
+	refresh, expRefresh, err := utils.GenerateToken(u.ID, u.Email, os.Getenv("REFRESH_SECRET"), os.Getenv("REFRESH_TTL"))
 	if err != nil {
-		h.writeErr(w, http.StatusInternalServerError, "could not generate refresh token")
+		h.error(w, http.StatusInternalServerError, "token error")
 		return
 	}
 
-	expiresAt := time.Unix(expRefresh, 0)
-	_, err = h.db.Exec(
-		`INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)`,
-		u.ID,
-		refresh,
-		expiresAt,
-	)
+	_, err = h.DB.Exec(`
+		INSERT INTO refresh_tokens (user_id, token, expires_at)
+		VALUES ($1, $2, $3)
+	`, u.ID, refresh, time.Unix(expRefresh, 0))
+
 	if err != nil {
-		h.writeErr(w, http.StatusInternalServerError, "could not save refresh token")
+		h.error(w, http.StatusInternalServerError, "db error")
 		return
 	}
 
-	resp := tokenResp{AccessToken: access, RefreshToken: refresh, ExpiresIn: expAccess}
-	h.writeJSON(w, http.StatusOK, resp)
+	h.json(w, http.StatusOK, tokenResp{
+		AccessToken:  access,
+		RefreshToken: refresh,
+		ExpiresIn:    expAccess,
+	})
 }
 
-func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		RefreshToken string `json:"refresh_token"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		h.writeErr(w, http.StatusBadRequest, "invalid json")
-		return
-	}
-	if body.RefreshToken == "" {
-		h.writeErr(w, http.StatusBadRequest, "refresh_token required")
+// ---------------- REFRESH ---------------------
+
+func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
+	var req refreshReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.error(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 
-	claims, err := utils.VerifyToken(body.RefreshToken, os.Getenv("REFRESH_SECRET"))
+	claims, err := utils.VerifyToken(req.RefreshToken, os.Getenv("REFRESH_SECRET"))
 	if err != nil {
-		h.writeErr(w, http.StatusUnauthorized, "invalid token")
-		return
-	}
-
-	userID := claims.SubjectInt()
-
-	var exists bool
-	err = h.db.Get(
-		&exists,
-		`SELECT EXISTS(
-            SELECT 1 FROM refresh_tokens
-            WHERE token=$1 AND user_id=$2 AND expires_at > now()
-        )`,
-		body.RefreshToken,
-		userID,
-	)
-	if err != nil {
-		h.writeErr(w, http.StatusInternalServerError, "db error")
-		return
-	}
-	if !exists {
-		h.writeErr(w, http.StatusUnauthorized, "refresh token not found or expired")
+		h.error(w, http.StatusUnauthorized, "invalid token")
 		return
 	}
 
-	access, expAccess, err := utils.GenerateToken(
-		userID,
-		claims.Email,
-		os.Getenv("ACCESS_SECRET"),
-		os.Getenv("ACCESS_TTL"),
-	)
-	if err != nil {
-		h.writeErr(w, http.StatusInternalServerError, "could not generate access token")
-		return
-	}
-	refresh, expRefresh, err := utils.GenerateToken(
-		userID,
-		claims.Email,
-		os.Getenv("REFRESH_SECRET"),
-		os.Getenv("REFRESH_TTL"),
-	)
-	if err != nil {
-		h.writeErr(w, http.StatusInternalServerError, "could not generate refresh token")
+	var exists bool
+	err = h.DB.Get(&exists, `
+		SELECT EXISTS (
+			SELECT 1 FROM refresh_tokens
+			WHERE token=$1 AND user_id=$2 AND expires_at > NOW()
+		)
+	`, req.RefreshToken, claims.SubjectInt())
+
+	if err != nil || !exists {
+		h.error(w, http.StatusUnauthorized, "refresh token expired or invalid")
 		return
 	}
 
-	expiresAt := time.Unix(expRefresh, 0)
-	tx, err := h.db.Beginx()
+	tx, err := h.DB.Beginx()
 	if err != nil {
-		h.writeErr(w, http.StatusInternalServerError, "db error")
+		h.error(w, http.StatusInternalServerError, "db error")
 		return
 	}
 	defer tx.Rollback()
 
-	if _, err = tx.Exec(`DELETE FROM refresh_tokens WHERE token=$1`, body.RefreshToken); err != nil {
-		h.writeErr(w, http.StatusInternalServerError, "db error")
+	_, _ = tx.Exec(`DELETE FROM refresh_tokens WHERE token=$1`, req.RefreshToken)
+
+	access, expAccess, err := utils.GenerateToken(claims.SubjectInt(), claims.Email, os.Getenv("ACCESS_SECRET"), os.Getenv("ACCESS_TTL"))
+	if err != nil {
+		h.error(w, http.StatusInternalServerError, "token error")
 		return
 	}
 
-	if _, err = tx.Exec(
-		`INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)`,
-		userID,
-		refresh,
-		expiresAt,
-	); err != nil {
-		h.writeErr(w, http.StatusInternalServerError, "db error")
+	refresh, expRefresh, err := utils.GenerateToken(claims.SubjectInt(), claims.Email, os.Getenv("REFRESH_SECRET"), os.Getenv("REFRESH_TTL"))
+	if err != nil {
+		h.error(w, http.StatusInternalServerError, "token error")
 		return
 	}
 
-	if err = tx.Commit(); err != nil {
-		h.writeErr(w, http.StatusInternalServerError, "db error")
+	_, err = tx.Exec(`
+		INSERT INTO refresh_tokens (user_id, token, expires_at)
+		VALUES ($1, $2, $3)
+	`, claims.SubjectInt(), refresh, time.Unix(expRefresh, 0))
+
+	if err != nil {
+		h.error(w, http.StatusInternalServerError, "db error")
 		return
 	}
 
-	resp := tokenResp{AccessToken: access, RefreshToken: refresh, ExpiresIn: expAccess}
-	h.writeJSON(w, http.StatusOK, resp)
+	if err := tx.Commit(); err != nil {
+		h.error(w, http.StatusInternalServerError, "db error")
+		return
+	}
+
+	h.json(w, http.StatusOK, tokenResp{
+		AccessToken:  access,
+		RefreshToken: refresh,
+		ExpiresIn:    expAccess,
+	})
 }
 
-func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		RefreshToken string `json:"refresh_token"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		h.writeErr(w, http.StatusBadRequest, "invalid json")
-		return
-	}
-	if body.RefreshToken == "" {
-		h.writeErr(w, http.StatusBadRequest, "refresh_token required")
+// -------------- LOGOUT -----------------------
+
+func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
+	var req refreshReq
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.error(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 
-	_, err := h.db.Exec(`DELETE FROM refresh_tokens WHERE token=$1`, body.RefreshToken)
+	_, err := h.DB.Exec(`DELETE FROM refresh_tokens WHERE token=$1`, req.RefreshToken)
 	if err != nil {
-		h.writeErr(w, http.StatusInternalServerError, "db error")
+		h.error(w, http.StatusInternalServerError, "db error")
 		return
 	}
 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
+// -------------- ME (protected) ----------------
+
+func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 	uid, ok := r.Context().Value(utils.CtxUserIDKey).(int64)
 	if !ok {
-		h.writeErr(w, http.StatusUnauthorized, "not authorized")
+		h.error(w, http.StatusUnauthorized, "not authorized")
 		return
 	}
 
-	var u models.User
-	if err := h.db.Get(&u,
-		`SELECT id, email, role, created_at FROM users WHERE id=$1`,
-		uid,
-	); err != nil {
-		h.writeErr(w, http.StatusInternalServerError, "db error")
+	var user models.User
+	err := h.DB.Get(&user, `
+		SELECT id, email, role, created_at
+		FROM users
+		WHERE id=$1
+	`, uid)
+
+	if err != nil {
+		h.error(w, http.StatusInternalServerError, "db error")
 		return
 	}
 
-	h.writeJSON(w, http.StatusOK, u)
-}
-
-func (h *Handler) writeErr(w http.ResponseWriter, code int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
-}
-
-func (h *Handler) writeJSON(w http.ResponseWriter, code int, v interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
+	h.json(w, http.StatusOK, user)
 }

@@ -1,0 +1,80 @@
+@baseUrl = http://localhost:4000
+@accessToken = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6InRlc3RAZXhhbXBsZS5jb20iLCJzdWIiOiIxIiwiZXhwIjoxNzYzNjYwNzE5LCJpYXQiOjE3NjM2NTk4MTl9.u1gqWzqrmh8NGkPeZtpyebNe1xCaFOdlC6CDkTsMyCM
+@refreshToken = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6InRlc3RAZXhhbXBsZS5jb20iLCJzdWIiOiIxIiwiZXhwIjoxNzY0MjY0NjE5LCJpYXQiOjE3NjM2NTk4MTl9.PlNDESTJeZ1ovDQygdRKbrhsS-Qcgmho8IWwKMKriYo
+
+###
+# SIGNUP
+POST {{baseUrl}}/signup
+Content-Type: application/json
+
+{
+  "name": "Test User",
+  "email": "test@example.com",
+  "password": "secret123"
+}
+
+###
+# LOGIN
+POST {{baseUrl}}/login
+Content-Type: application/json
+
+{
+  "email": "test@example.com",
+  "password": "secret123"
+}
+
+###
+# REFRESH TOKEN
+POST {{baseUrl}}/refresh
+Content-Type: application/json
+
+{
+  "refresh_token": "{{refreshToken}}"
+}
+
+###
+# ME (Protected)
+GET {{baseUrl}}/me
+Authorization: Bearer {{accessToken}}
+
+###
+# LOGOUT (Protected)
+POST {{baseUrl}}/logout
+Authorization: Bearer {{accessToken}}
+
+###
+# GET ALL POSTS
+GET {{baseUrl}}/posts
+Authorization: Bearer {{accessToken}}
+
+###
+# CREATE POST
+POST {{baseUrl}}/posts
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "title": "My first post",
+  "content": "Hello world!"
+}
+
+###
+# GET POST BY ID
+GET {{baseUrl}}/posts/2
+Authorization: Bearer {{accessToken}}
+
+###
+# UPDATE POST
+PUT {{baseUrl}}/posts/1
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "title": "Updated title",
+  "content": "Updated content"
+}
+
+###
+# DELETE POST
+DELETE {{baseUrl}}/posts/1
+Authorization: Bearer {{accessToken}}

@@ -20,25 +20,28 @@ type CustomClaims struct {
 	jwt.RegisteredClaims
 }
 
-// small helper to turn subject into int64
+// safer subject helper
 func (c *CustomClaims) SubjectInt() int64 {
-	if c.Subject == "" {
+	v, err := strconv.ParseInt(c.Subject, 10, 64)
+	if err != nil {
 		return 0
 	}
-	v, _ := strconv.ParseInt(c.Subject, 10, 64)
 	return v
 }
 
+// Parses TTL such as "15m", "1h", "20s", "30" (minutes)
 func parseTTL(ttlStr string) (time.Duration, error) {
 	if ttlStr == "" {
 		return 15 * time.Minute, nil
 	}
+
 	if strings.HasSuffix(ttlStr, "m") ||
 		strings.HasSuffix(ttlStr, "h") ||
 		strings.HasSuffix(ttlStr, "s") {
 		return time.ParseDuration(ttlStr)
 	}
-	// fallback: treat as minutes
+
+	// fallback: minutes
 	min, err := strconv.Atoi(ttlStr)
 	if err != nil {
 		return 0, err
@@ -56,22 +59,26 @@ func GenerateToken(userID int64, email, secret, ttlStr string) (string, int64, e
 		return "", 0, err
 	}
 
-	expiresAt := time.Now().Add(dur).Unix()
+	now := time.Now()
+	expTime := now.Add(dur)
+
 	claims := CustomClaims{
 		Email: email,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   strconv.FormatInt(userID, 10),
-			ExpiresAt: jwt.NewNumericDate(time.Unix(expiresAt, 0)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			ExpiresAt: jwt.NewNumericDate(expTime),
+			IssuedAt:  jwt.NewNumericDate(now),
 		},
 	}
 
-	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	signed, err := tok.SignedString([]byte(secret))
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+
+	signed, err := token.SignedString([]byte(secret))
 	if err != nil {
 		return "", 0, err
 	}
-	return signed, expiresAt, nil
+
+	return signed, expTime.Unix(), nil
 }
 
 func VerifyToken(tokenStr, secret string) (*CustomClaims, error) {
@@ -79,7 +86,8 @@ func VerifyToken(tokenStr, secret string) (*CustomClaims, error) {
 		return nil, errors.New("secret not configured")
 	}
 
-	parser := jwt.NewParser(jwt.WithValidMethods([]string{"HS256"}))
+	parser := jwt.NewParser(jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Name}))
+
 	var claims CustomClaims
 
 	_, err := parser.ParseWithClaims(tokenStr, &claims, func(token *jwt.Token) (interface{}, error) {

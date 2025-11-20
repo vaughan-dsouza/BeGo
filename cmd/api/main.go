@@ -38,15 +38,22 @@ func main() {
 	r := chi.NewRouter()
 
 	// Public
-	r.Post("/signup", h.SignUp)
-	r.Post("/login", h.Login)
-	r.Post("/refresh", h.Refresh)
+	r.Post("/signup", h.Auth.SignUp)
+	r.Post("/login", h.Auth.Login)
+	r.Post("/refresh", h.Auth.Refresh)
 
 	// Protected
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.AuthMiddleware)
-		r.Get("/me", h.Me)
-		r.Post("/logout", h.Logout)
+
+		r.Get("/me", h.Auth.Me)
+		r.Post("/logout", h.Auth.Logout)
+
+		r.Get("/posts", h.Posts.GetPosts)
+		r.Post("/posts", h.Posts.CreatePost)
+		r.Get("/posts/{id}", h.Posts.GetPostByID)
+		r.Put("/posts/{id}", h.Posts.UpdatePost)
+		r.Delete("/posts/{id}", h.Posts.DeletePost)
 	})
 
 	srv := &http.Server{
